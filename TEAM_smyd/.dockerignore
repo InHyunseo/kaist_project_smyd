@@ -1,0 +1,14 @@
+.git
+.gitignore
+.vscode
+
+# Keep build context small (simulator는 Docker 이미지에 포함)
+Mobility_Challenge_Simulator/images
+Mobility_Challenge_Simulator/tool
+
+# Build artifacts
+build
+install
+log
+logs
+__pycache__
