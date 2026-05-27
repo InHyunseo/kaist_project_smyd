@@ -72,19 +72,11 @@ class CollisionAvoidance:
         if eta_diff < 0.4:
             if my_eta < peer_eta:
                 return v_cmd
-            else:
-                return 0
-        else:
-            if v_cmd == 0:
-                return 0
-            else:
-                if my_eta < peer_eta:
-                    return v_cmd
-                elif my_eta >= peer_eta:
-                    margin_time = peer_eta + 1.0
-                    v_real = (my_eta * v_cmd) / margin_time
-                    v_cmd = v_real
-                    return v_cmd
+            return 0.0
+        if my_eta < peer_eta:
+            return v_cmd
+        margin_time = peer_eta + 1.0
+        return (my_eta * v_cmd) / margin_time
         
     
     def _zone_2_avoidance(self, v_cmd, my_eta, peer_eta, my_lap, peer_lap, my_x, my_y, peer_x, peer_y, is_cav1, my_flag, peer_flag):

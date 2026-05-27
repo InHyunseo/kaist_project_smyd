@@ -79,7 +79,7 @@ class P11Follower(Node):
         else:
             # 2) 자동 할당
             pkg_share = get_package_share_directory("pkg_p1_1")
-            wp = os.path.join(pkg_share, "waypoints", "cav1_path.json")
+            wp = os.path.join(pkg_share, "waypoints", "problem1-1_path.json")
         self.get_logger().info(f"Using waypoints file: {wp}")
 
         self.pts = self.load_json(wp)
@@ -118,6 +118,8 @@ class P11Follower(Node):
         self.declare_parameter("Kp", 0.2)
         self.declare_parameter("Ki", 0.0)
         self.declare_parameter("Kd", 0.0)
+        self.declare_parameter("wheelbase", 0.30)
+        self.L_wb = float(self.get_parameter("wheelbase").value)
         self.pid = SteeringPID(
             Kp=float(self.get_parameter("Kp").value),
             Ki=float(self.get_parameter("Ki").value),
@@ -143,7 +145,18 @@ class P11Follower(Node):
         if len(X) != len(Y):
             raise RuntimeError("lengths mismatch")
 
-        return [(float(x), float(y)) for x, y in zip(X, Y)]
+        pts = []
+        for x, y in zip(X, Y):
+            if x is None or y is None:
+                continue
+            try:
+                xf, yf = float(x), float(y)
+            except (TypeError, ValueError):
+                continue
+            if math.isnan(xf) or math.isnan(yf) or math.isinf(xf) or math.isinf(yf):
+                continue
+            pts.append((xf, yf))
+        return pts
 
     def nearest_index(self, x, y):
         back = 50
@@ -236,7 +249,7 @@ class P11Follower(Node):
         alpha = math.atan2(y_r, x_r)
         kappa = 2.0 * math.sin(alpha) / Ld
 
-        L_wb = 0.30   # wheelbase [m]
+        L_wb = self.L_wb
         delta_ff = math.atan(L_wb * kappa)
 
         # ===== PID feedback (steering angle) =====
@@ -255,7 +268,7 @@ class P11Follower(Node):
         w = v_cmd / L_wb * math.tan(delta)
 
         self.publish(v_cmd, w)
-        self.get_logger().info(f"v = {v_cmd}, w = {w}")
+        self.get_logger().debug(f"v = {v_cmd}, w = {w}")
 
 
 def main():

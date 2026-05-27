@@ -142,6 +142,8 @@ class P3Follower(Node):
         self.declare_parameter("Kp", 0.25)
         self.declare_parameter("Ki", 0.0)
         self.declare_parameter("Kd", 0.02)
+        self.declare_parameter("wheelbase", 0.30)
+        self.L_wb = float(self.get_parameter("wheelbase").value)
 
         self.pid = SteeringPID(
             Kp=float(self.get_parameter("Kp").value),
@@ -273,7 +275,18 @@ class P3Follower(Node):
         if len(X) != len(Y):
             raise RuntimeError("length mismatch between X and Y")
 
-        return [(float(x), float(y)) for x, y in zip(X, Y)]
+        pts = []
+        for x, y in zip(X, Y):
+            if x is None or y is None:
+                continue
+            try:
+                xf, yf = float(x), float(y)
+            except (TypeError, ValueError):
+                continue
+            if math.isnan(xf) or math.isnan(yf) or math.isinf(xf) or math.isinf(yf):
+                continue
+            pts.append((xf, yf))
+        return pts
 
     def load_conflict_map(self, path, path_key):
         with open(path, "r") as f:
@@ -660,7 +673,7 @@ class P3Follower(Node):
         alpha = math.atan2(y_r, x_r)
         kappa = 2.0 * math.sin(alpha) / Ld
 
-        L_wb = 0.30  # wheelbase [m]
+        L_wb = self.L_wb
         delta_ff = math.atan(L_wb * kappa)
 
         # PID feedback on lateral error (y in vehicle frame)

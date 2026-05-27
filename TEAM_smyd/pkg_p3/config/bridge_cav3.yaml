@@ -1,6 +1,6 @@
-name: bridge_cav1
+name: bridge_cav3
 topics:
-  /p3_v2v/cav2/state:
+  /p3_v2v/cav1/state:
     type: pkg_p3/msg/V2VState
     from_domain: 1
     to_domain: 3
@@ -8,7 +8,7 @@ topics:
     qos:
       reliability: reliable
 
-  /p3_v2v/cav3/state:
+  /p3_v2v/cav2/state:
     type: pkg_p3/msg/V2VState
     from_domain: 2
     to_domain: 3

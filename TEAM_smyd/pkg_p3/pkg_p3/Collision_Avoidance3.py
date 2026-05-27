@@ -8,7 +8,7 @@ Collision Avoidance Module (Problem 3)
 
 class CollisionAvoidance:
     def __init__(self, node):
-        self.node = node  # Â÷·® Á¦¾î ³ëµå ÀÎ½ºÅÏ½º
+        self.node = node  # 차량 제어 노드 인스턴스
         self.logger = node.get_logger()
 
     # ----------------------------
@@ -99,32 +99,24 @@ class CollisionAvoidance:
         if eta_diff < 0.4:
             if my_eta < peer_eta:
                 return v_cmd
-            else:
-                return 0
-        else:
-            if v_cmd == 0:
-                return 0
-            else:
-                if my_eta < peer_eta:
-                    return v_cmd
-                elif my_eta >= peer_eta:
-                    margin_time = peer_eta + 1.0
-                    v_real = (my_eta * v_cmd) / margin_time
-                    v_cmd = v_real
-                    return v_cmd
+            return 0.0
+        if my_eta < peer_eta:
+            return v_cmd
+        margin_time = peer_eta + 1.0
+        return (my_eta * v_cmd) / margin_time
 
     def _case_2_avoidance(self, v_cmd, my_eta, peer_eta, self_id, peer_id, all_peers):
         """ Zone 2 """
         cav3_in_zone1 = False
         cav3_eta = 999
-        # CAV3 Á¤º¸ È®ÀÎ (Zone 1¿¡ ÀÖ´ÂÁö)
+        # CAV3 정보 확인 (Zone 1에 있는지)
         if 3 in all_peers:
             p3 = all_peers[3]
             if p3['zone'] == 1:
                 cav3_in_zone1 = True
                 cav3_eta = float(p3['eta'])
 
-        #³»°¡ CAV1ÀÏ ¶§
+        # 내가 CAV1일 때
         if self_id == 1:
             if cav3_in_zone1:
                 if my_eta < cav3_eta:
@@ -136,7 +128,7 @@ class CollisionAvoidance:
                     return 0
                 return v_cmd
 
-        #³»°¡ CAV2ÀÏ ¶§
+        # 내가 CAV2일 때
         if self_id == 2:
             if peer_id == 1:
                 if cav3_in_zone1:
@@ -147,7 +139,7 @@ class CollisionAvoidance:
                     return 0
             return v_cmd
 
-        # ³»°¡ CAV3ÀÎ °æ¿ì
+        # 내가 CAV3인 경우
         if self_id == 3:
             if peer_id == 1:
                 if my_eta < peer_eta:

@@ -1,6 +1,6 @@
 name: bridge_cav2
 topics:
-  /p3_v2v/cav2/state:
+  /p3_v2v/cav1/state:
     type: pkg_p3/msg/V2VState
     from_domain: 1
     to_domain: 2

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import math
 import json
+import bisect
 from functools import partial
 
 import rclpy
@@ -13,11 +14,11 @@ import os
 def yaw_from_pose(msg: PoseStamped) -> float:
     q = msg.pose.orientation
 
-    # packed euler
-    if abs(q.w - 1.0) < 1e-6:
+    # Simulator Euler-packed format: q.w?1 with one of x/y/z outside [-1,1].
+    if abs(q.w - 1.0) < 1e-3 and (abs(q.x) > 1.0 or abs(q.y) > 1.0 or abs(q.z) > 1.0):
         return float(q.z)
 
-    # quaternion -> yaw
+    # Normal quaternion -> yaw
     siny = 2.0 * (q.w*q.z + q.x*q.y)
     cosy = 1.0 - 2.0 * (q.y*q.y + q.z*q.z)
     return math.atan2(siny, cosy)
@@ -155,11 +156,17 @@ class P2Follower(Node):
 
         self.current_lane = None          # 0/1/2
         self.lane_change_active = False
+        self._lane_change_start = None
+        self.declare_parameter("lane_change_timeout", 4.0)
+        self.lane_change_timeout = float(self.get_parameter("lane_change_timeout").value)
+        self._hv_sd_cache = {}
 
         # PID
         self.declare_parameter("Kp", 0.2)
         self.declare_parameter("Ki", 0.0)
         self.declare_parameter("Kd", 0.0)
+        self.declare_parameter("wheelbase", 0.30)
+        self.L_wb = float(self.get_parameter("wheelbase").value)
         self.pid = SteeringPID(
             float(self.get_parameter("Kp").value),
             float(self.get_parameter("Ki").value),
@@ -195,7 +202,18 @@ class P2Follower(Node):
         if X is None or Y is None or len(X) != len(Y):
             raise RuntimeError(f"{path}: JSON must contain X,Y (or x,y) and lengths must match")
 
-        return [(float(x), float(y)) for x, y in zip(X, Y)]
+        pts = []
+        for x, y in zip(X, Y):
+            if x is None or y is None:
+                continue
+            try:
+                xf, yf = float(x), float(y)
+            except (TypeError, ValueError):
+                continue
+            if math.isnan(xf) or math.isnan(yf) or math.isinf(xf) or math.isinf(yf):
+                continue
+            pts.append((xf, yf))
+        return pts
 
     def cb_hv(self, msg: PoseStamped, key: str):
         now = self.get_clock().now().nanoseconds * 1e-9
@@ -339,6 +357,25 @@ class P2Follower(Node):
 
         return best
 
+    def _hv_sd_for_lane(self, lane_i):
+        """Per-callback cache of (key, s, d) for each fresh HV projected onto lane_i."""
+        cache = self._hv_sd_cache
+        cached = cache.get(lane_i)
+        if cached is not None:
+            return cached
+        out = []
+        for key, st in self.hv_state.items():
+            if not self._hv_is_fresh(st):
+                continue
+            s_hv, d_hv = self._project_to_lane_sd(
+                lane_i, st["x"], st["y"], idx_hint_u=self.idx_u[lane_i]
+            )
+            if s_hv is None:
+                continue
+            out.append((key, s_hv, d_hv, st))
+        cache[lane_i] = out
+        return out
+
     def _find_rear_vehicle_same_lane(self, s_ego, my_lane, rear_range):
         """
         내 차선에서 '바로 뒤' 차량이 너무 가까우면 merge-yield 급감속을 피하기 위한 체크.
@@ -347,17 +384,10 @@ class P2Follower(Node):
         L = self.lane_len[my_lane]
         best = None
 
-        for st in self.hv_state.values():
-            if not self._hv_is_fresh(st):
-                continue
-
-            s_hv, d_hv = self._project_to_lane_sd(my_lane, st["x"], st["y"], idx_hint_u=self.idx_u[my_lane])
-            if s_hv is None:
-                continue
+        for _key, s_hv, d_hv, _st in self._hv_sd_for_lane(my_lane):
             if abs(d_hv) > self.lane_classify_band:
                 continue
-
-            ds_back = (s_ego - s_hv) % L  # hv가 뒤면 작은 양수
+            ds_back = (s_ego - s_hv) % L
             if 0.0 < ds_back <= rear_range:
                 if best is None or ds_back < best:
                     best = ds_back
@@ -461,24 +491,12 @@ class P2Follower(Node):
         L = self.lane_len[my_lane]
         best = None  # (ds, st)
 
-        for st in self.hv_state.values():
-            if not self._hv_is_fresh(st):
-                continue
-
-            s_hv, d_hv = self._project_to_lane_sd(
-                my_lane, st["x"], st["y"], idx_hint_u=self.idx_u[my_lane]
-            )
-            if s_hv is None:
-                continue
-
-            # 같은 차선 판정: |d|가 충분히 작아야 함
+        for _key, s_hv, d_hv, st in self._hv_sd_for_lane(my_lane):
             if abs(d_hv) > self.lane_classify_band:
                 continue
-
-            ds = (s_hv - s_ego) % L  # [0, L)
+            ds = (s_hv - s_ego) % L
             if ds <= 0.0 or ds > self.front_check_range:
                 continue
-
             if best is None or ds < best[0]:
                 best = (ds, st)
 
@@ -495,6 +513,9 @@ class P2Follower(Node):
         x = float(msg.pose.position.x)
         y = float(msg.pose.position.y)
         yaw = yaw_from_pose(msg)
+
+        # Per-callback HV projection cache (cleared each tick)
+        self._hv_sd_cache = {}
 
         # init lane selection (첫 ego pose에서 3개 lane 중 가장 가까운 lane을 current_lane으로)
         if self.current_lane is None:
@@ -528,19 +549,6 @@ class P2Follower(Node):
         merge_approach_lock = (merged_soon and (not merged_now))
 
 
-        # --- 디버그 로그(시간 타입 유지) ---
-        now_t = self.get_clock().now()
-        if (now_t - self._dbg_t_prev).nanoseconds > 1_000_000_000:
-            self._dbg_t_prev = now_t
-
-            rx, ry = self._lane_point_at_s(self.current_lane, s_ego)
-
-            anchors = []
-            for li in range(3):
-                j, d2 = self._nearest_index_window(li, rx, ry, self.idx_u[li])
-                px, py = self.lanes[li][j % self.N[li]]
-                anchors.append((px, py, math.sqrt(d2)))
-
         straight_ok = self._is_straight_section(self.current_lane, self.idx_u[self.current_lane])
 
         # 전방(같은 차선) 차량 탐색
@@ -566,6 +574,7 @@ class P2Follower(Node):
             if self._target_lane_is_free(offsets, target, x, y, yaw):
                 self.current_lane = target
                 self.lane_change_active = True
+                self._lane_change_start = self.get_clock().now().nanoseconds * 1e-9
                 self.idx_u[target] = self._idx_at_s(target, s_ego)
 
         if (not self.lane_change_active) and (not merge_approach_lock) and straight_ok and (front is not None):
@@ -614,6 +623,7 @@ class P2Follower(Node):
                 if target is not None:
                     self.current_lane = target
                     self.lane_change_active = True
+                    self._lane_change_start = self.get_clock().now().nanoseconds * 1e-9
                     j = self._idx_at_s(target, s_ego)
                     self.idx_u[target] = j
 
@@ -646,10 +656,17 @@ class P2Follower(Node):
 
 
 
-        # lane change 종료 조건(대충 중앙에 가까워지면 해제)
+        # lane change 종료 조건: 중앙 근접 OR timeout
         if self.lane_change_active:
+            now_sec = self.get_clock().now().nanoseconds * 1e-9
+            if self._lane_change_start is None:
+                self._lane_change_start = now_sec
             if abs(offsets[self.current_lane]) < (self.lane_band * 0.5):
                 self.lane_change_active = False
+                self._lane_change_start = None
+            elif (now_sec - self._lane_change_start) > self.lane_change_timeout:
+                self.lane_change_active = False
+                self._lane_change_start = None
 
         # ---- path following on current lane ----
         li = self.current_lane
@@ -696,7 +713,7 @@ class P2Follower(Node):
         # pure pursuit curvature -> steering angle
         alpha = math.atan2(y_r, x_r)
         kappa = 2.0 * math.sin(alpha) / Ld
-        L_wb = 0.30
+        L_wb = self.L_wb
         delta_ff = math.atan(L_wb * kappa)
 
         # PID feedback on lateral error
@@ -719,19 +736,16 @@ class P2Follower(Node):
             s.append(s[-1] + math.hypot(x1 - x0, y1 - y0))
         return s
 
-    # 0116 유진 수정
     def _idx_at_s(self, lane_i, s_ref):
-        # find waypoint index whose lane_s is closest to s_ref
+        # lane_s is monotonic non-decreasing -> O(log N) lookup.
         s_arr = self.lane_s[lane_i]
-        # O(N) linear search is acceptable for typical waypoint sizes.
-        best_i = 0
-        best = float("inf")
-        for i, sv in enumerate(s_arr):
-            d = abs(sv - s_ref)
-            if d < best:
-                best = d
-                best_i = i
-        return best_i
+        n = self.N[lane_i]
+        j = bisect.bisect_left(s_arr, s_ref)
+        if j <= 0:
+            return 0
+        if j >= n:
+            return n - 1
+        return j - 1 if (s_ref - s_arr[j - 1]) <= (s_arr[j] - s_ref) else j
 
     # 0116 유진 수정
     def _project_to_lane_sd(self, lane_i, x, y, idx_hint_u=None):

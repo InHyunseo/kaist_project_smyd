@@ -148,6 +148,8 @@ class P12Follower(Node):
         self.declare_parameter("Kp", 0.2)
         self.declare_parameter("Ki", 0.0)
         self.declare_parameter("Kd", 0.0)
+        self.declare_parameter("wheelbase", 0.30)
+        self.L_wb = float(self.get_parameter("wheelbase").value)
 
         self.pid = SteeringPID(
             Kp=float(self.get_parameter("Kp").value),
@@ -172,7 +174,8 @@ class P12Follower(Node):
         self.path_key = "path1" if self.is_cav1 else "path2"
         cm_path = self.get_parameter("conflict_map_json").value
         if not cm_path:
-            cm_path = self.get_parameter("zone_database").value  # fallback
+            cm_path = self.get_parameter("zones_json").value  # fallback
+        if not cm_path:
             raise RuntimeError("conflict_map_json (or zones_json) is empty")
 
         self.zones = self.load_conflict_map(cm_path, self.path_key)
@@ -201,7 +204,18 @@ class P12Follower(Node):
         if len(X) != len(Y):
             raise RuntimeError("lengths mismatch")
 
-        return [(float(x), float(y)) for x, y in zip(X, Y)]
+        pts = []
+        for x, y in zip(X, Y):
+            if x is None or y is None:
+                continue
+            try:
+                xf, yf = float(x), float(y)
+            except (TypeError, ValueError):
+                continue
+            if math.isnan(xf) or math.isnan(yf) or math.isinf(xf) or math.isinf(yf):
+                continue
+            pts.append((xf, yf))
+        return pts
 
     def load_conflict_map(self, path, path_key):
         with open(path, "r") as f:
@@ -263,7 +277,6 @@ class P12Follower(Node):
 
         msg = Accel()
         msg.linear.x = float(v)
-        msg.angular.x = float(w)
         msg.angular.z = float(w)
         self.pub.publish(msg)
 
@@ -455,34 +468,25 @@ class P12Follower(Node):
         zone_id, in_conflict, eta = self.compute_zone_state(idx_mod, self.v_ref)
         swapped = False
 
-        def get_peer_zone(pid):
-            if pid in self.peer_state:
-                p_s = self.peer_state[pid]
-                if (now - p_s["t"]) < self.peer_timeout:
-                    return int(p_s.get("zone", -999))
-            return -999
-        
-        # 0118 MJ
-        # zone_id, swapped = self.apply_zone_swap(zone_id)
-        if self.vid == 1 and zone_id == 1:
-            if get_peer_zone(2) == 2:
-                zone_id = 2
-                swapped = True
+        # peer_state is a single-peer dict; expose its current zone or -999.
+        def peer_zone():
+            if not self.peer_is_fresh() or self.peer_state is None:
+                return -999
+            return int(self.peer_state.get("zone", -999))
 
-        if self.vid == 1 and zone_id == 6:
-            if get_peer_zone(2) == 7:
-                zone_id = 7
-                swapped = True
-
-        if self.vid == 2 and zone_id == 7:
-            if get_peer_zone(2) == 1:
-                zone_id = 1
-                swapped = True
-
-        if self.vid == 2 and zone_id == 2:
-            if get_peer_zone(2) == 6:
-                zone_id = 6
-                swapped = True
+        pz = peer_zone()
+        if self.vid == 1 and zone_id == 1 and pz == 2:
+            zone_id = 2
+            swapped = True
+        elif self.vid == 1 and zone_id == 6 and pz == 7:
+            zone_id = 7
+            swapped = True
+        elif self.vid == 2 and zone_id == 7 and pz == 1:
+            zone_id = 1
+            swapped = True
+        elif self.vid == 2 and zone_id == 2 and pz == 6:
+            zone_id = 6
+            swapped = True
 
         # in_danger는 peer와 같은 zone에 있을 때만 1
         in_danger = 0
@@ -538,7 +542,7 @@ class P12Follower(Node):
         alpha = math.atan2(y_r, x_r)
         kappa = 2.0 * math.sin(alpha) / Ld
 
-        L_wb = 0.30   # wheelbase [m]
+        L_wb = self.L_wb
         delta_ff = math.atan(L_wb * kappa)
 
         # ===== PID feedback (steering angle) =====
